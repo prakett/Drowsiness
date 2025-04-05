@@ -6,6 +6,7 @@ from efficientnet_pytorch import EfficientNet
 from PIL import Image
 import mediapipe as mp
 import time
+from collections import deque
 
 # Load the trained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -14,29 +15,25 @@ model._fc = torch.nn.Linear(model._fc.in_features, 1)
 model.load_state_dict(torch.load("drowsiness_detector_model.pth", map_location=device))
 model.eval().to(device)
 
-# Initialize MediaPipe Face Detection
+# MediaPipe Face Detection
 mp_face_detection = mp.solutions.face_detection
 face_detection = mp_face_detection.FaceDetection(min_detection_confidence=0.5)
 
-# Define image preprocessing
+# Image transform
 transform = transforms.Compose([
     transforms.Resize((224, 224)),
     transforms.ToTensor(),
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
-# Drowsiness detection logic
-drowsy_frame_count = 0
-awake_frame_count = 0
-DROWSY_THRESHOLD = 30              # Drowsy if eyes closed for 30 frames
-AWAKE_RESET_THRESHOLD = 5          # Only reset drowsy counter after 5 awake frames
+# Camera
+cap = cv2.VideoCapture(1)
 
-# === IP CAM SETUP ===
-ip_cam_url = "http://192.168.0.108:4747/video"  # Replace with your phone's IP camera stream URL
-cap = cv2.VideoCapture(ip_cam_url)
-
-# FPS tracking
+# FPS
 prev_time = time.time()
+
+# Prediction smoothing
+prediction_history = deque(maxlen=10)
 
 while True:
     ret, frame = cap.read()
@@ -44,7 +41,7 @@ while True:
         print("Failed to grab frame")
         break
 
-    # FPS
+    # FPS Calculation
     current_time = time.time()
     fps = 1 / (current_time - prev_time)
     prev_time = current_time
@@ -53,7 +50,7 @@ while True:
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_detection.process(rgb_frame)
 
-    label = "AWAKE"  # Default label
+    label = "AWAKE"
     color = (0, 255, 0)
 
     if results.detections:
@@ -76,32 +73,26 @@ while True:
             with torch.no_grad():
                 output = model(face_tensor).squeeze()
                 prob = torch.sigmoid(output).item()
-                is_drowsy = prob < 0.5
-                print(f"Prediction: {prob:.3f}")
+                prediction_history.append(prob)
 
-            # Frame counter logic
+                avg_prob = sum(prediction_history) / len(prediction_history)
+                is_drowsy = avg_prob < 0.6
+
+                print(f"Raw: {prob:.3f}, Avg: {avg_prob:.3f}, Drowsy: {is_drowsy}")
+
             if is_drowsy:
-                drowsy_frame_count += 1
-                awake_frame_count = 0
-            else:
-                awake_frame_count += 1
-                if awake_frame_count >= AWAKE_RESET_THRESHOLD:
-                    drowsy_frame_count = 0
-
-            # Decide final label
-            if drowsy_frame_count >= DROWSY_THRESHOLD:
                 label = "DROWSY"
                 color = (0, 0, 255)
             else:
                 label = "AWAKE"
                 color = (0, 255, 0)
 
-            # Draw bounding box and label
+            # Draw box and label
             cv2.rectangle(frame, (x, y), (x + w_box, y + h_box), color, 2)
             cv2.putText(frame, label, (x, y - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-    # Display FPS
+    # Show FPS
     cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 

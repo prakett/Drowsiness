@@ -5,6 +5,7 @@ from torchvision import transforms
 from efficientnet_pytorch import EfficientNet
 from PIL import Image
 import mediapipe as mp
+import time
 
 # Load the trained model
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -24,13 +25,23 @@ transform = transforms.Compose([
     transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])
 ])
 
+# Drowsiness logic
+drowsy_frame_count = 0
+DROWSY_THRESHOLD = 30  # Number of consecutive frames to confirm drowsiness
+
 # Start webcam feed
 cap = cv2.VideoCapture(0)
+prev_time = time.time()
 
 while True:
     ret, frame = cap.read()
     if not ret:
         break
+
+    # Calculate FPS
+    current_time = time.time()
+    fps = 1 / (current_time - prev_time)
+    prev_time = current_time
 
     # Convert to RGB for face detection
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
@@ -40,33 +51,51 @@ while True:
         for detection in results.detections:
             bboxC = detection.location_data.relative_bounding_box
             h, w, c = frame.shape
-            x, y, w, h = int(bboxC.xmin * w), int(bboxC.ymin * h), int(bboxC.width * w), int(bboxC.height * h)
+            x = int(bboxC.xmin * w)
+            y = int(bboxC.ymin * h)
+            w_box = int(bboxC.width * w)
+            h_box = int(bboxC.height * h)
 
             # Draw rectangle around face
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+            cv2.rectangle(frame, (x, y), (x + w_box, y + h_box), (0, 255, 0), 2)
 
             # Crop face
-            face_crop = frame[y:y+h, x:x+w]
+            face_crop = frame[y:y + h_box, x:x + w_box]
             if face_crop.size == 0:
                 continue
 
-            # Convert face crop to PIL image
+            # Convert to PIL and preprocess
             face_pil = Image.fromarray(cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB))
-
-            # Preprocess image
             face_tensor = transform(face_pil).unsqueeze(0).to(device)
 
             # Make prediction
             with torch.no_grad():
                 output = model(face_tensor).squeeze()
                 prob = torch.sigmoid(output).item()
-                label = "AWAKE" if prob > 0.5 else "DROWSY"  # Fixed label logic
+                is_drowsy = prob < 0.5
+
+            # Update drowsiness frame counter
+            if is_drowsy:
+                drowsy_frame_count += 1
+            else:
+                drowsy_frame_count = 0
+
+            # Show label only if consistently drowsy
+            if drowsy_frame_count >= DROWSY_THRESHOLD:
+                label = "DROWSY"
+                color = (0, 0, 255)
+            else:
+                label = "AWAKE"
+                color = (0, 255, 0)
 
             # Display label
-            color = (0, 0, 255) if label == "DROWSY" else (0, 255, 0)
             cv2.putText(frame, label, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-    # Show the output frame
+    # Display FPS
+    cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+
+    # Show frame
     cv2.imshow("Drowsiness Detection", frame)
 
     # Press 'q' to exit

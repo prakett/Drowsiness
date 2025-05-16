@@ -7,8 +7,8 @@ from PIL import Image
 import mediapipe as mp
 import time
 from collections import deque
+from phone_Detection import detect_phone
 
-# === Load the trained model ===
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 model = EfficientNet.from_pretrained('efficientnet-b0')
 model._fc = torch.nn.Linear(model._fc.in_features, 1)
@@ -27,16 +27,16 @@ transform = transforms.Compose([
 ])
 
 # === Webcam ===
-cap = cv2.VideoCapture(1)  # Change to 1 if external cam is needed
+cap = cv2.VideoCapture(0)
 
-# === Prediction smoothing ===
+# === Smoothing ===
 prediction_history = deque(maxlen=5)
 state = "AWAKE"
 drowsy_count = 0
 awake_count = 0
 consecutive_required = 3
 
-# === FPS tracking ===
+# === FPS ===
 prev_time = time.time()
 
 while True:
@@ -45,12 +45,10 @@ while True:
         print("Failed to grab frame")
         break
 
-    # === FPS calculation ===
     current_time = time.time()
     fps = 1 / (current_time - prev_time)
     prev_time = current_time
 
-    # === Convert to RGB for MediaPipe ===
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     results = face_detection.process(rgb_frame)
 
@@ -66,7 +64,6 @@ while True:
             w_box = int(bboxC.width * w)
             h_box = int(bboxC.height * h)
 
-            # === Crop face ===
             face_crop = frame[y:y + h_box, x:x + w_box]
             if face_crop.size == 0:
                 continue
@@ -74,7 +71,6 @@ while True:
             face_pil = Image.fromarray(cv2.cvtColor(face_crop, cv2.COLOR_BGR2RGB))
             face_tensor = transform(face_pil).unsqueeze(0).to(device)
 
-            # === Prediction ===
             with torch.no_grad():
                 output = model(face_tensor).squeeze()
                 prob = torch.sigmoid(output).item()
@@ -83,7 +79,6 @@ while True:
             avg_prob = sum(prediction_history) / len(prediction_history)
             print(f"Raw: {prob:.3f} | Avg: {avg_prob:.3f} | State: {state}")
 
-            # === Debounce logic ===
             if avg_prob < 0.6:
                 drowsy_count += 1
                 awake_count = 0
@@ -94,7 +89,6 @@ while True:
                 drowsy_count = 0
                 awake_count = 0
 
-            # === State locking ===
             if drowsy_count >= consecutive_required:
                 state = "DROWSY"
             elif awake_count >= consecutive_required:
@@ -103,16 +97,23 @@ while True:
             label = state
             color = (0, 0, 255) if state == "DROWSY" else (0, 255, 0)
 
-            # === Draw bounding box and label ===
             cv2.rectangle(frame, (x, y), (x + w_box, y + h_box), color, 2)
             cv2.putText(frame, label, (x, y - 10),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
 
-    # === FPS display ===
+    # === Phone Detection (modular) ===
+    phone_alert, frame = detect_phone(frame)
+
+    # === Phone alert message ===
+    if phone_alert:
+        cv2.putText(frame, "WARNING: Phone Usage Detected!", (10, frame.shape[0] - 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 165, 255), 3)
+
+    # === FPS Display ===
     cv2.putText(frame, f"FPS: {fps:.2f}", (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
 
-    cv2.imshow("Drowsiness Detection", frame)
+    cv2.imshow("Driver Monitor", frame)
 
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
